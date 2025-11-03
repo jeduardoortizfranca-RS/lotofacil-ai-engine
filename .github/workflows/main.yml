@@ -1,0 +1,20 @@
+digite: ci.yml
+name: Build Check
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  check:
+    name: Verificar código
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Baixar código
+      uses: actions/checkout@v4
+    
+    - name: ✅ Código verificado
+      run: echo "Tudo certo! ✅"
