@@ -1,7 +1,50 @@
-.venv/
+# Ambientes virtuais
 venv/
+.venv/
+
+# Configuração do VS Code
+.vscode/
+
+# Arquivos de ambiente (NUNCA subir chaves de API)
+.env
+.env.*
+*.env
+
+# Arquivos de cache do Python
 __pycache__/
 *.pyc
-.env
-data/mazusoft_data.json
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Logs
 *.log
+
+# Arquivos temporários de editor / sistema
+*.swp
+*.swo
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Arquivos de cobertura de testes
+htmlcov/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# Build / distribuição
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Jupyter (se algum dia usar)
+.ipynb_checkpoints/
+
+# Arquivos gerados localmente
+*.sqlite3

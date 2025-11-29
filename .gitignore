@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Ambientes virtuais
 venv/
 .venv/
@@ -48,3 +49,12 @@ dist/
 
 # Arquivos gerados localmente
 *.sqlite3
+=======
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+data/mazusoft_data.json
+*.log
+>>>>>>> b6b42c4536f564eb4b9530cafb4966845c79a279
