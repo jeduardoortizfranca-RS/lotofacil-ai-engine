@@ -1,0 +1,106 @@
+ARQUITETURA DO SISTEMA COMPLETO
+lotofacil_ai_v3/
+
+│
+
+├── backend/
+
+│ ├── core/
+
+│ │ ├── genetic_algorithm.py # Seu GA otimizado
+
+│ │ ├── fitness_modules.py # 18 módulos de fitness
+
+│ │ ├── mazusoft_integration.py # Integração Mazusoft
+
+│ │ ├── event_detector.py # Detecta saltos/quebras
+
+│ │ └── reinforcement_learning.py # Q-learning
+
+│ │
+
+│ ├── database/
+
+│ │ ├── supabase_manager.py # CRUD Supabase
+
+│ │ ├── sqlite_manager.py # Cache local
+
+│ │ └── migrations/ # Versionamento de schema
+
+│ │
+
+│ ├── api/
+
+│ │ ├── main.py # FastAPI server
+
+│ │ ├── routes/
+
+│ │ │ ├── jogos.py # Gerar jogos
+
+│ │ │ ├── aprendizado.py # Feedback de acertos
+
+│ │ │ └── estatisticas.py # Dashboards
+
+│ │ └── models/
+
+│ │ └── schemas.py # Pydantic models
+
+│ │
+
+│ └── utils/
+
+│ ├── validators.py # Validações (soma, pares, etc.)
+
+│ └── logger.py # Logging estruturado
+
+│
+
+├── frontend/
+
+│ ├── src/
+
+│ │ ├── components/
+
+│ │ │ ├── Dashboard.tsx
+
+│ │ │ ├── JogoGenerator.tsx
+
+│ │ │ └── EventosRaros.tsx
+
+│ │ ├── lib/
+
+│ │ │ └── supabase.ts
+
+│ │ └── App.tsx
+
+│ │
+
+│ └── package.json
+
+│
+
+├── data/
+
+│ ├── mazusoft_data.json # Dados Mazusoft
+
+│ ├── concursos_historico.json # Últimos 500 concursos
+
+│ └── eventos_raros.json # Padrões anômalos
+
+│
+
+├── tests/
+
+│ ├── test_genetic_algorithm.py
+
+│ ├── test_event_detector.py
+
+│ └── test_api.py
+
+│
+
+├── docker-compose.yml # Deploy completo
+
+├── requirements.txt
+
+└── README.md

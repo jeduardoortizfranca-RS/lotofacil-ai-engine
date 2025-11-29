@@ -1,0 +1,25 @@
+{
+  "weights": {
+    "freq": 1.0,
+    "gap": 2.0,
+    "comb": 1.5,
+    "context_comb": 1.0,
+    "recurrence": 1.5,
+    "anomalo": 3.5,
+    "break": 3.0,
+    "diversity": 5.0,
+    "par": 8.0,
+    "sum": 0.1,
+    "consec": 6.0,
+    "col": 1.8,
+    "primes": 2.0,
+    "fibonacci": 1.5,
+    "duques": 2.0,
+    "moldura": 1.2,
+    "multiplos_3": 1.0,
+    "pareto": 1.5
+  },
+  "timestamp": "2025-11-05T11:52:56.049425",
+  "episode": 0,
+  "epsilon": 0.15
+}
