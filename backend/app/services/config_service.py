@@ -129,7 +129,7 @@ class ConfigService:
             return cls._premios_default()
 
         try:
-            premios_list = await instance.supabase_client.get_premios()
+            premios_list = await instance.supabase_client.get_tabela_premios()
             premios_dict = {p.get('acertos'): float(p.get('valor')) for p in premios_list if p.get('acertos') is not None and p.get('valor') is not None}
             if premios_dict:
                 logger.debug(f"Tabela de prêmios carregada: {premios_dict}")

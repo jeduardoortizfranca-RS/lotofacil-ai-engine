@@ -23,6 +23,7 @@ app = FastAPI(
 )
 
 supabase_client = SupabaseClient()
+
 # Instanciar o motor de IA globalmente ou em um gerenciador de dependências,
 # mas para simplificar e seguir o fluxo, vamos instanciar aqui.
 # O LotofacilAIv3 não deve precisar de concursos_base ou pesos_ia no seu __init__
@@ -32,10 +33,8 @@ supabase_client = SupabaseClient()
 # Pela descrição do erro anterior, a LotofacilGenerator era o problema.
 # Vamos assumir que LotofacilAIv3 pode ser instanciado sem argumentos iniciais complexos,
 # e que os dados de base e pesos são passados para o método de geração.
-lotofacil_engine = LotofacilAIv3(
-    modo_offline=True,
-    mazusoft_data_path=os.path.join(backend_path, "data", "mazusoft_data.json"), # Caminho ajustado
-) # Assumindo que o construtor não precisa de argumentos iniciais complexos.
+lotofacil_engine = LotofacilAIv3() # CORREÇÃO: Removido 'modo_offline' e 'mazusoft_data_path' do construtor.
+                                   # Assumindo que o construtor não precisa de argumentos iniciais complexos.
 
 # ==========================
 # MODELOS Pydantic
@@ -205,14 +204,17 @@ async def conferir_jogos(request: ConferirRequest):
         acertos_por_jogo: List[int] = []
         distribuicao_acertos = {"0-10": 0, "11": 0, "12": 0, "13": 0, "14": 0, "15": 0}
         premio_total = 0.0
+
         for jogo in jogos_ia:
             dezenas_jogo = set(jogo["dezenas"])
             acertos = len(dezenas_jogo.intersection(dezenas_sorteadas))
             acertos_por_jogo.append(acertos)
+
             if acertos >= 11:
                 distribuicao_acertos[str(acertos)] += 1
             else:
                 distribuicao_acertos["0-10"] += 1
+
             if acertos == 11:
                 premio_total += 6.00
             elif acertos == 12:
@@ -238,11 +240,10 @@ async def conferir_jogos(request: ConferirRequest):
                 "lucro": lucro,
                 "data_conferencia": datetime.utcnow().isoformat(),
             }
-
             # Resultado oficial completo para o JSONB
             resultado_oficial_json = {
                 "numero": concurso_oficial["numero"],
-                "data": concurso_oficial.get("data"),
+                "data": concurso_oficial.get("data_sorteio"), # CORREÇÃO: Usando 'data_sorteio' conforme memória
                 "dezenas": dezenas_sorteadas,
                 "soma_dezenas": concurso_oficial.get("soma_dezenas", 0),
                 "pares": concurso_oficial.get("pares", 0),
@@ -251,7 +252,6 @@ async def conferir_jogos(request: ConferirRequest):
                 "ciclo_qtd": concurso_oficial.get("ciclo_qtd", 0),
                 "ausentes": concurso_oficial.get("ausentes", 0),
             }
-
             salvo = await supabase_client.salvar_resultado_conferencia(
                 numero_concurso=request.concurso,
                 jogos_gerados_id=id_lote_jogos,
@@ -273,6 +273,7 @@ async def conferir_jogos(request: ConferirRequest):
                 print(f"❌ Erro ao salvar resultado da conferência para concurso {request.concurso}")
         else:
             print("⚠️ Conferência não salva em resultados_conferencia pois não há jogos_gerados_id associado.")
+
         return ConferirResponse(
             concurso=request.concurso,
             dezenas_sorteadas=dezenas_sorteadas,

@@ -1,277 +1,316 @@
 # backend/core/lotofacil_ai_v3.py
-
 import logging
-import numpy as np
 import random
-import uuid # Para gerar UUIDs
+from datetime import datetime
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
-from collections import defaultdict, Counter
 
-# Importações de serviços e modelos do seu projeto
+# Importa o SupabaseClient para interagir com o banco de dados
 from app.services.supabase_client import SupabaseClient
-from app.services.config_service import ConfigService
-from core.event_detector import EventDetector, EventType
-from core.models import Concurso, Frequencia, PesoIA, Premio # Importa os modelos de dados
 
 logger = logging.getLogger(__name__)
 
 class LotofacilAIv3:
-    def __init__(self):
-        self.historico_concursos: List[Concurso] = [] # Usando o modelo Concurso
-        self.frequencias: Dict[int, int] = {}
-        self.pesos_ia: Dict[str, float] = {}
-        self.event_detector: Optional[EventDetector] = None
-        self.concurso_anterior: Optional[Concurso] = None # Usando o modelo Concurso
-        self.ultimo_concurso_numero: int = 0
-        self.supabase_client: Optional[SupabaseClient] = None # Adicionado para acesso direto
-        self.config_service: Optional[ConfigService] = None # Adicionado para acesso direto
+    def __init__(self, db_client: SupabaseClient, modo_offline: bool = False, mazusoft_data_path: str = None):
+        self.supabase_client = db_client
+        self.modo_offline = modo_offline
+        self.mazusoft_data_path = mazusoft_data_path
+        self.historico_concursos: List[Dict[str, Any]] = []
+        self.ultimo_concurso_sorteado: Optional[Dict[str, Any]] = None
+        self.tabela_premios: Dict[str, float] = {}
+        self.config_lotofacil: Dict[str, Any] = {}
+        self.fitness_weights: Dict[str, float] = {
+            "repetidas": 0.25,
+            "ausentes": 0.15,
+            "frequencia": 0.20,
+            "ciclo": 0.20, # Novo peso para o ciclo das dezenas
+            "primos": 0.10,
+            "fibonacci": 0.10
+        }
+        self.dezenas_primos = [2, 3, 5, 7, 11, 13, 17, 19, 23]
+        self.dezenas_fibonacci = [1, 2, 3, 5, 8, 13, 21]
 
     @classmethod
-    async def create(cls, modo_offline: bool, mazusoft_data_path: str, db_client: SupabaseClient):
-        """Método de fábrica assíncrono para inicializar a IA."""
-        instance = cls()
-        instance.supabase_client = db_client # Atribui o cliente Supabase
-        instance.config_service = ConfigService() # Obtém a instância singleton do ConfigService
+    async def create(cls, db_client: SupabaseClient, modo_offline: bool = False, mazusoft_data_path: str = None):
+        """
+        Método de fábrica assíncrono para inicializar a IA e carregar dados.
+        """
+        instance = cls(db_client, modo_offline, mazusoft_data_path)
         await instance._carregar_dados_iniciais()
-        await instance._inicializar_componentes(mazusoft_data_path) # Passa o path aqui
         return instance
 
     async def _carregar_dados_iniciais(self):
-        logger.info("Carregando dados iniciais do Supabase...")
-        if not self.supabase_client:
-            raise RuntimeError("SupabaseClient não inicializado no LotofacilAIv3.")
+        """
+        Carrega dados iniciais do Supabase ou de arquivos locais.
+        """
+        logger.info("Carregando dados iniciais para a IA...")
+        if self.modo_offline:
+            # Implementar carregamento de dados de arquivos locais se necessário
+            logger.warning("Modo offline não totalmente implementado para carregamento de dados.")
+            pass
+        else:
+            # Carregar histórico de concursos do Supabase
+            historico_raw = await self.supabase_client.get_todos_concursos() # CORREÇÃO AQUI
+            if historico_raw:
+                # Ordenar pelo número do concurso para garantir a sequência
+                self.historico_concursos = sorted(historico_raw, key=lambda x: x['numero'])
+                logger.info(f"✅ {len(self.historico_concursos)} concursos históricos carregados do Supabase.")
 
-        # Carregar histórico de concursos
-        historico_raw = await self.supabase_client.get_historico_concursos()
-        if not historico_raw:
-            raise RuntimeError("Nenhum histórico de concursos encontrado. Por favor, importe os dados.")
+                # Definir o último concurso sorteado
+                if self.historico_concursos:
+                    self.ultimo_concurso_sorteado = self.historico_concursos[-1]
+                    logger.info(f"✅ Último concurso sorteado identificado: {self.ultimo_concurso_sorteado['numero']}.")
+            else:
+                logger.warning("⚠️ Nenhum concurso histórico encontrado no Supabase.")
 
-        # Converte os dicionários brutos em objetos Concurso
-        self.historico_concursos = [Concurso(**c) for c in historico_raw]
+            # Carregar tabela de prêmios
+            self.tabela_premios = await self.supabase_client.get_tabela_premios()
+            if self.tabela_premios:
+                logger.info("✅ Tabela de prêmios carregada.")
+            else:
+                logger.warning("⚠️ Tabela de prêmios não carregada. Usando valores padrão (0).")
+                self.tabela_premios = {"11": 0.0, "12": 0.0, "13": 0.0, "14": 0.0, "15": 0.0} # Valores padrão
 
-        # Ordenar por número de concurso para garantir a sequência
-        self.historico_concursos.sort(key=lambda x: x.numero)
-        self.concurso_anterior = self.historico_concursos[-1]
-        self.ultimo_concurso_numero = self.concurso_anterior.numero
+            # Carregar configurações da Lotofácil (ex: custo do jogo)
+            self.config_lotofacil = await self.supabase_client.get_config_lotofacil()
+            if self.config_lotofacil:
+                logger.info("✅ Configurações da Lotofácil carregadas.")
+            else:
+                logger.warning("⚠️ Configurações da Lotofácil não carregadas. Usando valores padrão.")
+                self.config_lotofacil = {"custo_jogo": 3.50} # Valor padrão
 
-        # Carregar frequências
-        frequencias_db = await self.supabase_client.get_frequencias()
-        self.frequencias = {f['dezena']: f['ocorrencias'] for f in frequencias_db}
+        logger.info("Dados iniciais da IA carregados com sucesso.")
 
-        # Carregar pesos da IA
-        if not self.config_service:
-            raise RuntimeError("ConfigService não inicializado no LotofacilAIv3.")
-        self.pesos_ia = await self.config_service.get_pesos_ia_atuais()
-        if not self.pesos_ia:
-            logger.warning("Pesos da IA não encontrados. Usando pesos padrão e registrando.")
-            default_pesos = self.config_service._pesos_default() # Pega os pesos default do ConfigService
-            await self.config_service.registrar_nova_versao_pesos(default_pesos, "Pesos padrão iniciais (gerados automaticamente)")
-            self.pesos_ia = default_pesos # Atualiza com os pesos default registrados
+    def _get_dezenas_sorteadas(self, concurso: Dict[str, Any]) -> List[int]:
+        """Extrai as dezenas sorteadas de um registro de concurso."""
+        dezenas = []
+        for i in range(1, 16):
+            dezena = concurso.get(f'bola{i}')
+            if dezena is not None:
+                dezenas.append(dezena)
+        return sorted(dezenas)
 
-        logger.info(f"✅ Dados iniciais carregados. Último concurso: {self.ultimo_concurso_numero}")
-        logger.info(f"   Pesos da IA: {self.pesos_ia}")
+    def _calcular_repetidas_do_anterior(self, jogo: List[int], concurso_anterior_dezenas: List[int]) -> int:
+        """Calcula quantas dezenas do jogo se repetem do concurso anterior."""
+        return len(set(jogo).intersection(concurso_anterior_dezenas))
 
-    async def _inicializar_componentes(self, mazusoft_data_path: str):
-        logger.info("Inicializando componentes do motor de IA...")
+    def _calcular_ausentes(self, jogo: List[int], concurso_anterior_dezenas: List[int]) -> int:
+        """Calcula quantas dezenas do jogo estavam ausentes no concurso anterior."""
+        return len(set(jogo) - set(concurso_anterior_dezenas))
 
-        # Carrega o histórico de dezenas sorteadas para o EventDetector
-        dezenas_historicas = [c.dezenas_sorteadas for c in self.historico_concursos]
+    def _calcular_frequencia(self, jogo: List[int]) -> float:
+        """Calcula a frequência média das dezenas no histórico."""
+        if not self.historico_concursos:
+            return 0.0
 
-        # Inicializa o EventDetector
-        self.event_detector = EventDetector(
-            historico_file="eventos_raros.json",
-            historico_dezenas_sorteadas=dezenas_historicas
+        contagem_dezenas = {dezena: 0 for dezena in range(1, 26)}
+        for concurso in self.historico_concursos:
+            dezenas_sorteadas = self._get_dezenas_sorteadas(concurso)
+            for dezena in dezenas_sorteadas:
+                contagem_dezenas[dezena] += 1
+
+        frequencia_total = sum(contagem_dezenas.get(dezena, 0) for dezena in jogo)
+        return frequencia_total / len(jogo) if jogo else 0.0
+
+    def _calcular_ciclo_dezenas(self, jogo: List[int]) -> float:
+        """
+        Calcula a pontuação baseada no ciclo das dezenas.
+        Dezenas que estão "em ciclo" (não saem há algumas rodadas, mas devem sair logo)
+        ou que acabaram de sair e tendem a repetir.
+        Isso requer uma análise mais profunda do histórico. Por enquanto, um placeholder.
+        """
+        # Implementação mais sofisticada aqui, buscando dados de ciclo do Supabase
+        # ou calculando com base no historico_concursos.
+        # Por simplicidade, vamos usar um placeholder que favorece dezenas que não saíram
+        # no último concurso, mas que têm alta frequência geral.
+        if not self.historico_concursos or not self.ultimo_concurso_sorteado:
+            return 0.0
+
+        dezenas_ultimo = set(self._get_dezenas_sorteadas(self.ultimo_concurso_sorteado))
+        dezenas_ausentes_ultimo = set(range(1, 26)) - dezenas_ultimo
+
+        score_ciclo = 0
+        for dezena in jogo:
+            if dezena in dezenas_ausentes_ultimo:
+                # Dá um peso maior para dezenas ausentes que têm boa frequência histórica
+                # (isso é uma simplificação do conceito de "ciclo")
+                frequencia_dezena = self._calcular_frequencia([dezena])
+                score_ciclo += frequencia_dezena * 0.5 # Exemplo de ponderação
+            else:
+                # Dá um peso menor para dezenas que acabaram de sair e podem repetir
+                score_ciclo += 0.1 # Exemplo
+        return score_ciclo / len(jogo) if jogo else 0.0
+
+
+    def _calcular_dezenas_primos(self, jogo: List[int]) -> int:
+        """Calcula quantas dezenas do jogo são números primos."""
+        return len(set(jogo).intersection(self.dezenas_primos))
+
+    def _calcular_dezenas_fibonacci(self, jogo: List[int]) -> int:
+        """Calcula quantas dezenas do jogo são números de Fibonacci."""
+        return len(set(jogo).intersection(self.dezenas_fibonacci))
+
+    def _calcular_fitness(self, jogo: List[int], concurso_anterior_dezenas: List[int]) -> float:
+        """
+        Calcula a pontuação de "fitness" de um jogo com base em vários critérios.
+        Quanto maior o fitness, melhor o jogo é considerado.
+        """
+        if not concurso_anterior_dezenas:
+            logger.warning("Concurso anterior não disponível para cálculo de fitness. Retornando 0.")
+            return 0.0
+
+        repetidas = self._calcular_repetidas_do_anterior(jogo, concurso_anterior_dezenas)
+        ausentes = self._calcular_ausentes(jogo, concurso_anterior_dezenas)
+        frequencia = self._calcular_frequencia(jogo)
+        ciclo = self._calcular_ciclo_dezenas(jogo) # Novo critério
+        primos = self._calcular_dezenas_primos(jogo)
+        fibonacci = self._calcular_dezenas_fibonacci(jogo)
+
+        # Normalização e ponderação dos critérios
+        # Repetidas: idealmente entre 8 e 9 (7-10)
+        score_repetidas = 1 - abs(repetidas - 8.5) / 8.5 # Max 1.0 para 8.5, min 0 para 0 ou 17
+
+        # Ausentes: idealmente entre 6 e 7 (5-8)
+        score_ausentes = 1 - abs(ausentes - 6.5) / 6.5 # Max 1.0 para 6.5
+
+        # Frequência: já é uma média, pode ser usada diretamente ou normalizada
+        score_frequencia = frequencia / (len(self.historico_concursos) * 15) # Normaliza pela freq máxima possível
+
+        # Ciclo: já é uma média, pode ser usada diretamente
+        score_ciclo = ciclo
+
+        # Primos: idealmente entre 4 e 5
+        score_primos = 1 - abs(primos - 4.5) / 4.5
+
+        # Fibonacci: idealmente entre 4 e 5
+        score_fibonacci = 1 - abs(fibonacci - 4.5) / 4.5
+
+        # Combina os scores com os pesos definidos
+        fitness = (
+            self.fitness_weights["repetidas"] * score_repetidas +
+            self.fitness_weights["ausentes"] * score_ausentes +
+            self.fitness_weights["frequencia"] * score_frequencia +
+            self.fitness_weights["ciclo"] * score_ciclo + # Adicionado
+            self.fitness_weights["primos"] * score_primos +
+            self.fitness_weights["fibonacci"] * score_fibonacci
         )
-        logger.info("✅ EventDetector inicializado.")
+        return fitness
 
-        # Outros componentes podem ser inicializados aqui (Mazusoft, GeneticOptimizer, etc.)
-        # Por enquanto, mantemos o foco no que é essencial para o erro atual.
-        logger.info("✅ Componentes do motor de IA inicializados.")
+    async def gerar_jogos(self, quantidade_jogos: int) -> List[List[int]]:
+        """
+        Gera uma lista de jogos da Lotofácil usando a IA.
+        """
+        if not self.historico_concursos:
+            logger.error("Histórico de concursos não carregado. Não é possível gerar jogos.")
+            return []
 
-    def _calcular_metricas_jogo(self, jogo: List[int]) -> Dict[str, Any]:
-        """Calcula as métricas de um jogo para avaliação."""
-        jogo_ordenado = sorted(jogo)
+        # Pega as dezenas do último concurso sorteado para cálculo de fitness
+        if not self.ultimo_concurso_sorteado:
+            logger.warning("Último concurso sorteado não disponível. Tentando buscar o mais recente.")
+            self.ultimo_concurso_sorteado = await self.supabase_client.get_ultimo_concurso()
+            if not self.ultimo_concurso_sorteado:
+                logger.error("Não foi possível obter o último concurso sorteado para gerar jogos.")
+                return []
 
-        # Métricas básicas
-        soma = sum(jogo_ordenado)
-        pares = sum(1 for d in jogo_ordenado if d % 2 == 0)
-        impares = 15 - pares
+        concurso_anterior_dezenas = self._get_dezenas_sorteadas(self.ultimo_concurso_sorteado)
 
-        # Frequência
-        frequencia_total = sum(self.frequencias.get(d, 0) for d in jogo_ordenado)
+        jogos_gerados: List[List[int]] = []
+        tentativas = 0
+        max_tentativas_por_jogo = 1000 # Limite para evitar loop infinito
 
-        # Repetidas do concurso anterior
-        repetidas = 0
-        if self.concurso_anterior and self.concurso_anterior.dezenas_sorteadas:
-            repetidas = len(set(jogo_ordenado).intersection(self.concurso_anterior.dezenas_sorteadas))
+        while len(jogos_gerados) < quantidade_jogos and tentativas < quantidade_jogos * max_tentativas_por_jogo:
+            tentativas += 1
+            # Gera um jogo aleatório inicial
+            jogo_candidato = sorted(random.sample(range(1, 26), 15))
 
-        # Ciclo (simplificado: quantas dezenas do jogo estão no ciclo atual)
-        ciclo_count = 0
-        if self.concurso_anterior and self.concurso_anterior.ausentes:
-            ciclo_count = len(set(jogo_ordenado).intersection(self.concurso_anterior.ausentes))
+            # Calcula o fitness do jogo candidato
+            fitness_candidato = self._calcular_fitness(jogo_candidato, concurso_anterior_dezenas)
 
-        # Outras métricas (primos, fibonacci, moldura, centro, multiplos_3, sequências, etc.)
-        primos = len([d for d in jogo_ordenado if d in [2, 3, 5, 7, 11, 13, 17, 19, 23]])
-        fibonacci = len([d for d in jogo_ordenado if d in [1, 2, 3, 5, 8, 13, 21]])
-        multiplos_3 = len([d for d in jogo_ordenado if d % 3 == 0])
-        moldura = len([d for d in jogo_ordenado if d in [1,2,3,4,5, 6,10,11,15,16,20,21,22,23,24,25]])
-        centro = len([d for d in jogo_ordenado if d in [7,8,9,12,13,14,17,18,19]])
+            # Critério de aceitação (pode ser ajustado)
+            # Por exemplo, aceitar jogos com fitness acima de um certo limiar
+            # Ou usar um algoritmo genético mais complexo para "evoluir" os jogos
+            # Por simplicidade, vamos aceitar jogos com fitness razoável e garantir diversidade
 
-        # Análise de sequências (usando EventDetector ou lógica própria)
-        # Para esta versão, vamos usar as implementações básicas do EventDetector
-        grupos_sequencia, max_consecutivo, blocos = self.event_detector._analisar_sequencias(jogo_ordenado)
-        densidade_espacial = self.event_detector._calcular_densidade_espacial(jogo_ordenado)
+            # Para esta versão, vamos usar um critério simples:
+            # Se o fitness for acima de um limiar, ou se for um dos primeiros jogos
+            # para garantir que a quantidade seja atingida.
+            # Um fitness de 0.5 é um bom ponto de partida para jogos "medianos"
+            if fitness_candidato > 0.4 or len(jogos_gerados) < quantidade_jogos / 2: # Aceita mais facilmente os primeiros jogos
+                if jogo_candidato not in jogos_gerados: # Evita jogos duplicados
+                    jogos_gerados.append(jogo_candidato)
+                    logger.debug(f"Jogo gerado com fitness {fitness_candidato:.4f}: {jogo_candidato}")
+
+        if len(jogos_gerados) < quantidade_jogos:
+            logger.warning(f"Não foi possível gerar a quantidade desejada de jogos ({quantidade_jogos}). Gerados {len(jogos_gerados)}.")
+        else:
+            logger.info(f"✅ {len(jogos_gerados)} jogos gerados com sucesso.")
+
+        return jogos_gerados
+
+    def conferir_jogos(self, jogos: List[List[int]], dezenas_sorteadas: List[int]) -> Dict[str, Any]:
+        """
+        Confere um lote de jogos contra as dezenas sorteadas.
+        Retorna a distribuição de acertos, prêmios e lucro.
+        """
+        distribuicao_acertos = {"0-10": 0, "11": 0, "12": 0, "13": 0, "14": 0, "15": 0}
+        acertos_por_jogo: List[int] = []
+        premio_total = 0.0
+        custo_jogo = self.config_lotofacil.get("custo_jogo", 3.50) # Pega o custo do jogo da config
+
+        for jogo in jogos:
+            acertos = len(set(jogo).intersection(dezenas_sorteadas))
+            acertos_por_jogo.append(acertos)
+
+            if acertos >= 11:
+                distribuicao_acertos[str(acertos)] += 1
+                premio_total += self.tabela_premios.get(str(acertos), 0.0)
+            else:
+                distribuicao_acertos["0-10"] += 1
+
+        total_gasto = len(jogos) * custo_jogo
+        lucro = premio_total - total_gasto
 
         return {
-            "soma": soma,
-            "pares": pares,
-            "impares": impares,
-            "frequencia": frequencia_total,
-            "repetidas": repetidas,
-            "ciclo": ciclo_count,
-            "primos": primos,
-            "fibonacci": fibonacci,
-            "multiplos_3": multiplos_3,
-            "moldura": moldura,
-            "centro": centro,
-            "grupos_sequencia": grupos_sequencia,
-            "max_consecutivo": max_consecutivo,
-            "densidade_espacial": densidade_espacial,
+            "total_jogos": len(jogos),
+            "distribuicao_acertos": distribuicao_acertos,
+            "acertos_por_jogo": acertos_por_jogo,
+            "premio_total": premio_total,
+            "total_gasto": total_gasto,
+            "lucro": lucro
         }
 
-    def _calcular_fitness(self, jogo: List[int], metricas: Dict[str, Any]) -> float:
-        """Calcula o fitness (pontuação) de um jogo com base nos pesos da IA."""
-        fitness_score = 0.0
-
-        # Normalização e aplicação de pesos
-        # Usando os pesos carregados de pesos_ia
-
-        # Soma (ideal 205, desvio 30)
-        soma_norm = 1 - abs(metricas['soma'] - 205) / 60
-        fitness_score += self.pesos_ia.get("soma", 0.0) * soma_norm
-
-        # Pares (ideal 7-8)
-        pares_norm = 1 - abs(metricas['pares'] - 7.5) / 7.5
-        fitness_score += self.pesos_ia.get("pares", 0.0) * pares_norm
-
-        # Frequência (quanto maior, melhor)
-        max_freq_historica = max(self.frequencias.values()) * 15 if self.frequencias else 1
-        freq_norm = metricas['frequencia'] / max_freq_historica
-        fitness_score += self.pesos_ia.get("frequencia", 0.0) * freq_norm
-
-        # Repetidas (ideal 8-10)
-        repetidas_norm = 1 - abs(metricas['repetidas'] - 9) / 9
-        fitness_score += self.pesos_ia.get("repetidas", 0.0) * repetidas_norm
-
-        # Ausentes (ideal 5-7)
-        ausentes_norm = 1 - abs(metricas['ciclo'] - 6) / 6
-        fitness_score += self.pesos_ia.get("ausentes", 0.0) * ausentes_norm
-
-        # Outras métricas...
-        primos_norm = 1 - abs(metricas['primos'] - 5) / 5
-        fitness_score += self.pesos_ia.get("primos", 0.0) * primos_norm
-
-        fibonacci_norm = 1 - abs(metricas['fibonacci'] - 4) / 4
-        fitness_score += self.pesos_ia.get("fibonacci", 0.0) * fibonacci_norm
-
-        multiplos_3_norm = 1 - abs(metricas['multiplos_3'] - 5) / 5
-        fitness_score += self.pesos_ia.get("multiplos_3", 0.0) * multiplos_3_norm
-
-        moldura_norm = 1 - abs(metricas['moldura'] - 10) / 10
-        fitness_score += self.pesos_ia.get("moldura", 0.0) * moldura_norm
-
-        centro_norm = 1 - abs(metricas['centro'] - 5) / 5
-        fitness_score += self.pesos_ia.get("centro", 0.0) * centro_norm
-
-        # Adicione outras métricas conforme seus pesos_ia
-        # Exemplo para 'sequencia_longa' e 'densidade'
-        # if "sequencia_longa" in self.pesos_ia:
-        #     seq_longa_norm = metricas['max_consecutivo'] / 15 # Normaliza
-        #     fitness_score += self.pesos_ia.get("sequencia_longa", 0.0) * seq_longa_norm
-
-        # if "densidade" in self.pesos_ia:
-        #     fitness_score += self.pesos_ia.get("densidade", 0.0) * metricas['densidade_espacial']
-
-        return fitness_score
-
-    def _gerar_jogo_aleatorio(self) -> List[int]:
-        """Gera um jogo aleatório de 15 dezenas."""
-        return sorted(random.sample(range(1, 26), 15))
-
-    async def gerar_jogos(self, quantidade_jogos: int = 30, concurso_alvo: Optional[int] = None) -> Dict[str, Any]:
+    async def ajustar_pesos_fitness(self, resultados_anteriores: List[Dict[str, Any]]):
         """
-        Gera um lote de jogos otimizados pela IA.
-        Salva o lote na tabela jogos_gerados e retorna os detalhes.
+        Ajusta os pesos de fitness da IA com base nos resultados de conferências anteriores.
+        Esta é uma implementação simplificada para demonstração.
         """
-        if concurso_alvo is None:
-            concurso_alvo = self.ultimo_concurso_numero + 1
+        logger.info("Ajustando pesos de fitness da IA com base em resultados anteriores...")
 
-        logger.info(f"Gerando {quantidade_jogos} jogos para o concurso {concurso_alvo}...")
+        if not resultados_anteriores:
+            logger.warning("Nenhum resultado anterior para ajustar os pesos de fitness.")
+            return
 
-        jogos_candidatos = []
-        num_candidatos = quantidade_jogos * 100 # Gerar mais candidatos para seleção
+        # Exemplo simplificado: se o lucro médio foi positivo, aumenta um pouco os pesos.
+        # Se foi negativo, tenta ajustar para buscar mais jogos com 11+ acertos.
 
-        for _ in range(num_candidatos):
-            jogo = self._gerar_jogo_aleatorio()
-            metricas = self._calcular_metricas_jogo(jogo)
-            fitness = self._calcular_fitness(jogo, metricas)
-            jogos_candidatos.append({"jogo": jogo, "fitness": fitness, "metricas": metricas})
+        total_lucro = sum(r.get("lucro", 0) for r in resultados_anteriores)
+        media_lucro = total_lucro / len(resultados_anteriores)
 
-        # Selecionar os jogos com maior fitness
-        jogos_candidatos.sort(key=lambda x: x["fitness"], reverse=True)
-        jogos_selecionados_raw = jogos_candidatos[:quantidade_jogos]
+        if media_lucro > 0:
+            logger.info("Lucro médio positivo. Reforçando pesos atuais ligeiramente.")
+            for key in self.fitness_weights:
+                self.fitness_weights[key] *= 1.01 # Aumenta 1%
+        else:
+            logger.info("Lucro médio negativo. Tentando ajustar pesos para buscar mais acertos.")
+            # Exemplo: Aumentar peso de frequência e ciclo, diminuir de repetidas/ausentes
+            self.fitness_weights["frequencia"] = min(self.fitness_weights["frequencia"] * 1.05, 0.5) # Max 0.5
+            self.fitness_weights["ciclo"] = min(self.fitness_weights["ciclo"] * 1.05, 0.5)
+            self.fitness_weights["repetidas"] = max(self.fitness_weights["repetidas"] * 0.95, 0.1) # Min 0.1
+            self.fitness_weights["ausentes"] = max(self.fitness_weights["ausentes"] * 0.95, 0.1)
 
-        # Formatar para a resposta e salvar no banco
-        jogos_para_db = []
-        jogos_para_resposta = []
-        for jogo_data in jogos_selecionados_raw:
-            # Aqui você pode formatar o jogo para o modelo JogoGerado se quiser mais detalhes no DB
-            # Por enquanto, vamos salvar apenas as dezenas na lista 'jogos' da tabela jogos_gerados
-            jogos_para_db.append(jogo_data["jogo"])
-            jogos_para_resposta.append(jogo_data["jogo"]) # Para a resposta do endpoint
+        # Normalizar pesos para que a soma seja 1.0
+        soma_pesos = sum(self.fitness_weights.values())
+        for key in self.fitness_weights:
+            self.fitness_weights[key] /= soma_pesos
 
-        # Obter custo do jogo do ConfigService
-        if not self.config_service:
-            raise RuntimeError("ConfigService não inicializado no LotofacilAIv3.")
-        config = await self.config_service.get_config_lotofacil()
-        custo_jogo = float(config.get("custo_jogo", 3.50))
-        custo_total = quantidade_jogos * custo_jogo
+        logger.info(f"✅ Pesos de fitness ajustados: {self.fitness_weights}")
 
-        # Salvar jogos gerados no Supabase
-        id_lote = str(uuid.uuid4())
-        registro_salvo = await self.supabase_client.salvar_jogos_gerados(
-            id=id_lote,
-            concurso_alvo=concurso_alvo,
-            quantidade_jogos=quantidade_jogos,
-            jogos=jogos_para_db, # Salva apenas as dezenas
-            data_geracao=datetime.now().isoformat(),
-            custo_total=custo_total,
-            status_conferencia="pendente"
-        )
-
-        logger.info(f"✅ {quantidade_jogos} jogos gerados e salvos para o concurso {concurso_alvo}.")
-        logger.info(f"   ID do lote: {registro_salvo['id']}")
-        logger.info(f"   Custo total: R$ {custo_total:.2f}")
-
-        return {
-            "jogos_gerados_id": registro_salvo['id'],
-            "concurso_alvo": concurso_alvo,
-            "quantidade_jogos": quantidade_jogos,
-            "jogos": jogos_para_resposta,
-            "custo_total": custo_total,
-            "data_geracao": datetime.now().isoformat() # Retorna como string ISO para o endpoint
-        }
-
-    # Métodos para o módulo de aprendizado da IA (futuro)
-    async def _analisar_desempenho_lote(self, resultados_conferencia_id: int):
-        """Analisa o desempenho de um lote de jogos e retorna insights para ajuste de pesos."""
-        pass
-
-    async def _ajustar_pesos_ia(self, insights: Dict[str, Any]):
-        """Ajusta os pesos da IA com base nos insights de desempenho."""
-        pass
-
-    async def _registrar_historico_treinamento(self, episodio_data: Dict[str, Any]):
-        """Registra um episódio de treinamento na tabela historico_treinamento."""
-        pass
